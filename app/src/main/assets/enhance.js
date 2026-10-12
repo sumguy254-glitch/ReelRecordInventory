@@ -1,110 +1,46 @@
 (function(){
-  if (window.__reelRecordEnhancedLookup) return;
-  window.__reelRecordEnhancedLookup = true;
+  if(window.__reelRecordEnhancedLookupV3)return;window.__reelRecordEnhancedLookupV3=true;
+  const API_SETTINGS_KEY='reel_record_movie_api_settings_v1';
+  const sourceRank={'My-UPC / DigitalUPC':100,'UPCitemdb':70,'upc.dev':60};
 
-  try {
-    const formatSelect = document.getElementById('format');
-    if (formatSelect && !Array.from(formatSelect.options).some(o => o.value === 'HD DVD' || o.textContent === 'HD DVD')) {
-      const option = document.createElement('option');
-      option.textContent = 'HD DVD';
-      option.value = 'HD DVD';
-      const dvd = Array.from(formatSelect.options).find(o => o.value === 'DVD' || o.textContent === 'DVD');
-      formatSelect.insertBefore(option, dvd || null);
-    }
-    const hint = document.querySelector('.hint');
-    if (hint) hint.textContent = 'Movie lookup checks My-UPC / DigitalUPC first, then upc.dev and UPCitemdb. Music also checks MusicBrainz. If no source knows the exact release, you can still enter it manually.';
-  } catch (_) {}
+  function addUiEnhancements(){try{
+    const formatSelect=document.getElementById('format');
+    if(formatSelect&&!Array.from(formatSelect.options).some(o=>o.value==='HD DVD'||o.textContent==='HD DVD')){const option=document.createElement('option');option.textContent='HD DVD';option.value='HD DVD';const dvd=Array.from(formatSelect.options).find(o=>o.value==='DVD'||o.textContent==='DVD');formatSelect.insertBefore(option,dvd||null)}
+    const hint=document.querySelector('.hint');if(hint)hint.textContent='Multi-stage movie lookup: UPC identifies the release/title, then TMDb or OMDb can enrich it with poster, year, director and genre. API credentials are stored only on this device.';
+    const actionRow=document.getElementById('clear')?.parentElement;if(actionRow&&!document.getElementById('enrichTitle')){const b=document.createElement('button');b.id='enrichTitle';b.className='secondary';b.textContent='Enrich Title';actionRow.appendChild(b)}
+    if(hint&&!document.getElementById('movieApiSettingsBtn')){const row=document.createElement('div');row.className='actions';row.style.marginTop='8px';const b=document.createElement('button');b.id='movieApiSettingsBtn';b.className='secondary';b.textContent='Movie API Settings';row.appendChild(b);hint.insertAdjacentElement('afterend',row)}
+    if(!document.getElementById('movieApiSettingsModal')){const modal=document.createElement('div');modal.id='movieApiSettingsModal';modal.className='modalbg hidden';modal.innerHTML=`<div class="modal"><div class="head" style="display:flex;justify-content:space-between;align-items:center"><span>Movie Enrichment Settings</span><button id="movieApiClose" class="secondary">Close</button></div><div class="body"><div class="hint" style="margin-top:0">The app never puts these credentials in your GitHub project. They are saved only in this app's local storage on this device.</div><label>TMDb v3 API Key</label><input id="tmdbCredential" type="password" autocomplete="off" placeholder="Optional — recommended"><div class="muted" style="margin-top:5px">Get one from your TMDb account → Settings → API. Use the v3 API Key (not the long bearer token).</div><label>OMDb API Key</label><input id="omdbKey" type="password" autocomplete="off" placeholder="Optional fallback"><div class="muted" style="margin-top:5px">OMDb is used as a fallback and to fill missing details when available.</div><div class="actions"><button id="movieApiSave">Save Settings</button><button id="movieApiClear" class="secondary">Clear Keys</button></div><div id="movieApiStatus" class="status"></div></div></div>`;document.body.appendChild(modal)}
+    document.getElementById('movieApiSettingsBtn').onclick=openApiSettings;document.getElementById('movieApiClose').onclick=()=>document.getElementById('movieApiSettingsModal').classList.add('hidden');document.getElementById('movieApiSettingsModal').onclick=ev=>{if(ev.target.id==='movieApiSettingsModal')ev.target.classList.add('hidden')};document.getElementById('movieApiSave').onclick=saveApiSettingsFromUi;document.getElementById('movieApiClear').onclick=clearApiSettings;document.getElementById('enrichTitle').onclick=enrichCurrentForm;
+  }catch(_){}}
 
-  const addUnique = (list, seen, item) => {
-    if (!item || !item.title) return;
-    const key = [item.source || '', item.title || '', item.format || '', item.year || ''].join('|').toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    list.push(item);
-  };
+  function readApiSettings(){try{return JSON.parse(localStorage.getItem(API_SETTINGS_KEY)||'{}')}catch(_){return{}}}
+  function writeApiSettings(s){localStorage.setItem(API_SETTINGS_KEY,JSON.stringify({tmdb:s.tmdb||'',omdb:s.omdb||''}))}
+  function openApiSettings(){const s=readApiSettings();document.getElementById('tmdbCredential').value=s.tmdb||'';document.getElementById('omdbKey').value=s.omdb||'';document.getElementById('movieApiStatus').textContent='';document.getElementById('movieApiSettingsModal').classList.remove('hidden')}
+  function saveApiSettingsFromUi(){const s={tmdb:document.getElementById('tmdbCredential').value.trim(),omdb:document.getElementById('omdbKey').value.trim()};writeApiSettings(s);const x=document.getElementById('movieApiStatus');x.className='status ok';x.textContent='Saved on this device. Future movie scans will automatically use the configured enrichment service(s).'}
+  function clearApiSettings(){writeApiSettings({tmdb:'',omdb:''});document.getElementById('tmdbCredential').value='';document.getElementById('omdbKey').value='';const x=document.getElementById('movieApiStatus');x.className='status';x.textContent='Movie API credentials cleared.'}
+  function cleanMovieTitle(raw=''){let s=String(raw||'').replace(/\s+/g,' ').trim();s=s.replace(/\[[^\]]*(dvd|blu|4k|uhd|hd dvd|disc)[^\]]*\]/ig,' ').replace(/\((dvd|blu[- ]?ray|4k|ultra hd|uhd|hd dvd|widescreen|fullscreen|special edition|collector'?s edition|anniversary edition)[^)]*\)/ig,' ').replace(/\b(4k ultra hd|ultra hd|uhd|blu[- ]?ray|hd dvd|dvd|digital copy|widescreen|fullscreen)\b/ig,' ').replace(/\b(special edition|collector'?s edition|anniversary edition|combo pack|steelbook)\b/ig,' ').replace(/\s*[-–—:]\s*$/,'').replace(/\s{2,}/g,' ').trim();return s||String(raw||'').trim()}
+  function addUnique(list,seen,item){if(!item||!item.title)return;const key=[item.source||'',item.title||'',item.format||'',item.year||''].join('|').toLowerCase();if(seen.has(key))return;seen.add(key);list.push(item)}
+  function apiConfigured(){const s=readApiSettings();return!!(s.tmdb||s.omdb)}
+  function parseYear(v=''){const m=String(v).match(/(?:19|20)\d{2}/);return m?parseInt(m[0],10):0}
+  function normalizedTitle(v=''){return String(v).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()}
 
-  const enhancedLookup = async function(arg) {
-    let c = norm(arg || e.barcode.value);
-    if (!c) return status('Scan or enter a barcode first.', 'err');
-    e.barcode.value = c;
-    e.modal.classList.remove('hidden');
-    e.results.innerHTML = '';
-    e.lookupMsg.textContent = 'Searching My-UPC / DigitalUPC, upc.dev, UPCitemdb and MusicBrainz…';
+  function jsonp(url,callbackParam='callback',timeoutMs=10000){return new Promise((resolve,reject)=>{const cb='__rrJsonp_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2),script=document.createElement('script');let done=false;const cleanup=()=>{try{delete window[cb]}catch(_){window[cb]=undefined}script.remove()};const timer=setTimeout(()=>{if(done)return;done=true;cleanup();reject(new Error('Lookup timed out'))},timeoutMs);window[cb]=data=>{if(done)return;done=true;clearTimeout(timer);cleanup();resolve(data)};script.onerror=()=>{if(done)return;done=true;clearTimeout(timer);cleanup();reject(new Error('Lookup request failed'))};script.src=url+(url.includes('?')?'&':'?')+encodeURIComponent(callbackParam)+'='+encodeURIComponent(cb);document.head.appendChild(script)})}
 
-    const r = [];
-    const seen = new Set();
+  async function enrichTmdb(title,year,key){if(!key)return null;const wantedYear=parseYear(year);let url='https://api.themoviedb.org/3/search/movie?api_key='+encodeURIComponent(key)+'&include_adult=false&language=en-US&query='+encodeURIComponent(title);if(wantedYear)url+='&year='+wantedYear;const search=await jsonp(url),results=Array.isArray(search?.results)?search.results:[];if(!results.length)return null;const wanted=normalizedTitle(title);let best=null,bestScore=-1e9;results.slice(0,12).forEach((m,i)=>{const cand=normalizedTitle(m.title||m.original_title||'');let score=20-i;if(cand===wanted)score+=100;else if(cand.includes(wanted)||wanted.includes(cand))score+=55;const y=parseYear(m.release_date||'');if(wantedYear&&y){if(y===wantedYear)score+=35;else if(Math.abs(y-wantedYear)===1)score+=12;else score-=Math.min(20,Math.abs(y-wantedYear)*2)}if(score>bestScore){bestScore=score;best=m}});if(!best?.id)return null;const details=await jsonp('https://api.themoviedb.org/3/movie/'+best.id+'?api_key='+encodeURIComponent(key)+'&language=en-US&append_to_response=credits');const directors=(details?.credits?.crew||[]).filter(p=>p?.job==='Director').map(p=>p.name).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).join(', '),genres=(details?.genres||[]).map(g=>g?.name).filter(Boolean).join(','),releaseYear=parseYear(details?.release_date||best.release_date||'');let detail=(details?.overview||'').trim();if(detail.length>280)detail=detail.slice(0,277)+'...';if(details?.runtime)detail+=(detail?' • ':'')+details.runtime+' min';return{source:'TMDb',type:'Movie',title:details?.title||best.title||title,creator:directors,year:releaseYear?String(releaseYear):'',genre:genres,coverUrl:details?.poster_path?'https://image.tmdb.org/t/p/w500'+details.poster_path:'',format:'',detail}}
+  async function enrichOmdb(title,year,key){if(!key)return null;let url='https://www.omdbapi.com/?apikey='+encodeURIComponent(key)+'&t='+encodeURIComponent(title)+'&type=movie&plot=short&r=json';const y=parseYear(year);if(y)url+='&y='+y;const j=await jsonp(url);if(String(j?.Response).toLowerCase()!=='true')return null;return{source:'OMDb',type:'Movie',title:j.Title||title,creator:j.Director&&j.Director!=='N/A'?j.Director:'',year:parseYear(j.Year)?String(parseYear(j.Year)):'',genre:j.Genre&&j.Genre!=='N/A'?j.Genre:'',coverUrl:j.Poster&&j.Poster!=='N/A'?j.Poster:'',format:'',detail:j.Plot&&j.Plot!=='N/A'?j.Plot:''}}
+  function mergeEnrichment(tmdb,omdb){if(!tmdb)return omdb;if(!omdb)return tmdb;const pick=k=>tmdb[k]||omdb[k]||'';return{source:'TMDb + OMDb',type:'Movie',title:pick('title'),creator:pick('creator'),year:pick('year'),genre:pick('genre'),coverUrl:pick('coverUrl'),format:'',detail:pick('detail')}}
+  async function enrichByTitle(title,year){const s=readApiSettings();if(!(s.tmdb||s.omdb))return null;const clean=cleanMovieTitle(title),[t,o]=await Promise.allSettled([enrichTmdb(clean,year,s.tmdb||''),enrichOmdb(clean,year,s.omdb||'')]);return mergeEnrichment(t.status==='fulfilled'?t.value:null,o.status==='fulfilled'?o.value:null)}
+  async function enrichMovieCandidate(candidate){if(!candidate?.title)return null;const x=await enrichByTitle(candidate.title,candidate.year||'');if(!x?.title)return null;return{...candidate,...x,type:'Movie',format:candidate.format||x.format||'',source:(candidate.source?candidate.source+' → ':'')+(x.source||'Movie API'),detail:[candidate.detail,x.detail].filter(Boolean).join(' • ')}}
+  async function enrichCurrentForm(){const title=e.title.value.trim();if(!title)return status('Enter or scan a movie title first.','err');if(!apiConfigured()){openApiSettings();const s=document.getElementById('movieApiStatus');s.className='status err';s.textContent='Add a TMDb v3 API key or OMDb key first.';return}status('Enriching movie details…');try{const x=await enrichByTitle(title,e.year.value||'');if(!x?.title)return status('No TMDb/OMDb match found for that title.','err');for(const k of['title','creator','year','genre','coverUrl'])if(x[k])e[k].value=x[k];status('Movie details enriched from '+(x.source||'movie database')+'.','ok')}catch(_){status('Movie enrichment failed. Check your API credentials and internet connection.','err')}}
 
-    try {
-      if (window.AndroidBridge && typeof AndroidBridge.lookupExtraSources === 'function') {
-        const raw = AndroidBridge.lookupExtraSources(c);
-        const extras = JSON.parse(raw || '[]');
-        if (Array.isArray(extras)) extras.forEach(x => addUnique(r, seen, x));
-      }
-    } catch (_) {}
-
-    try {
-      const z = await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc=' + encodeURIComponent(c));
-      if (z.ok) {
-        const j = await z.json();
-        for (const it of j.items || []) {
-          addUnique(r, seen, {
-            source: 'UPCitemdb',
-            type: /vinyl|album|cd|music|record/i.test((it.category || '') + ' ' + (it.title || '')) ? 'Music' : 'Movie',
-            title: it.title || '',
-            creator: it.brand || '',
-            year: '',
-            genre: it.category || '',
-            coverUrl: (it.images || [])[0] || '',
-            format: guess((it.title || '') + ' ' + (it.description || '')),
-            detail: it.description || ''
-          });
-        }
-      }
-    } catch (_) {}
-
-    try {
-      const z = await fetch('https://musicbrainz.org/ws/2/release/?query=' + encodeURIComponent('barcode:' + c) + '&fmt=json&limit=6');
-      if (z.ok) {
-        const j = await z.json();
-        for (const rel of j.releases || []) {
-          addUnique(r, seen, {
-            source: 'MusicBrainz',
-            type: 'Music',
-            title: rel.title || '',
-            creator: (rel['artist-credit'] || []).map(a => a.name || (a.artist && a.artist.name)).filter(Boolean).join(', '),
-            year: (rel.date || '').slice(0, 4),
-            genre: '',
-            coverUrl: rel.id ? 'https://coverartarchive.org/release/' + rel.id + '/front-250' : '',
-            format: '',
-            detail: [rel.country, rel.status].filter(Boolean).join(' • ')
-          });
-        }
-      }
-    } catch (_) {}
-
-    if (!r.length) {
-      e.lookupMsg.textContent = 'No automatic match found in any connected barcode source. You can enter the release details manually.';
-      return;
-    }
-
-    e.lookupMsg.textContent = 'Found ' + r.length + ' match' + (r.length === 1 ? '' : 'es') + '. Movie-specific results are shown first.';
-    r.forEach((x, i) => {
-      const d = document.createElement('div');
-      d.className = 'result';
-      d.innerHTML = (x.coverUrl ? `<img src="${esc(x.coverUrl)}" onerror="this.style.visibility='hidden'">` : '<div class="cover"></div>') +
-        `<div><div class="title">${esc(x.title || 'Untitled')}</div><div class="meta">${esc([x.type, x.format, x.creator, x.year, x.detail, x.source].filter(Boolean).join(' • '))}</div></div><button data-pick="${i}">Use</button>`;
-      e.results.appendChild(d);
-    });
-
-    e.results.onclick = ev => {
-      if (ev.target.dataset.pick === undefined) return;
-      const x = r[+ev.target.dataset.pick];
-      for (const k of ['type', 'title', 'creator', 'year', 'genre', 'coverUrl', 'format']) if (x[k]) e[k].value = x[k];
-      e.modal.classList.add('hidden');
-      status('Metadata loaded from ' + x.source + '. Review it, then save.', 'ok');
-    };
-  };
-
-  window.lookup = enhancedLookup;
-  try { lookup = enhancedLookup; } catch (_) {}
+  async function enhancedLookup(arg){let c=norm(arg||e.barcode.value);if(!c)return status('Scan or enter a barcode first.','err');e.barcode.value=c;e.modal.classList.remove('hidden');e.results.innerHTML='';e.lookupMsg.textContent='Stage 1 of 2: identifying the UPC and likely title…';const r=[],seen=new Set();
+    try{if(window.AndroidBridge&&typeof AndroidBridge.lookupExtraSources==='function'){const extras=JSON.parse(AndroidBridge.lookupExtraSources(c)||'[]');if(Array.isArray(extras))extras.forEach(x=>addUnique(r,seen,x))}}catch(_){}
+    try{const z=await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc='+encodeURIComponent(c));if(z.ok){const j=await z.json();for(const it of j.items||[])addUnique(r,seen,{source:'UPCitemdb',type:/vinyl|album|cd|music|record/i.test((it.category||'')+' '+(it.title||''))?'Music':'Movie',title:it.title||'',creator:it.brand||'',year:'',genre:it.category||'',coverUrl:(it.images||[])[0]||'',format:guess((it.title||'')+' '+(it.description||'')),detail:it.description||''})}}catch(_){}
+    try{const z=await fetch('https://musicbrainz.org/ws/2/release/?query='+encodeURIComponent('barcode:'+c)+'&fmt=json&limit=6');if(z.ok){const j=await z.json();for(const rel of j.releases||[])addUnique(r,seen,{source:'MusicBrainz',type:'Music',title:rel.title||'',creator:(rel['artist-credit']||[]).map(a=>a.name||(a.artist&&a.artist.name)).filter(Boolean).join(', '),year:(rel.date||'').slice(0,4),genre:'',coverUrl:rel.id?'https://coverartarchive.org/release/'+rel.id+'/front-250':'',format:'',detail:[rel.country,rel.status].filter(Boolean).join(' • ')})}}catch(_){}
+    const movieCandidates=r.filter(x=>x.type==='Movie').sort((a,b)=>(sourceRank[b.source]||0)-(sourceRank[a.source]||0));if(movieCandidates.length&&apiConfigured()){e.lookupMsg.textContent='Stage 2 of 2: enriching “'+cleanMovieTitle(movieCandidates[0].title)+'” with TMDb/OMDb…';const enriched=await enrichMovieCandidate(movieCandidates[0]);if(enriched)r.unshift(enriched)}
+    if(!r.length){e.lookupMsg.textContent='No UPC source identified this release. You can enter the title manually, then tap Enrich Title to pull movie metadata.';return}
+    if(movieCandidates.length&&!apiConfigured())e.lookupMsg.textContent='UPC match found. Add a TMDb/OMDb credential in Movie API Settings to automatically add poster, director, year and genre.';else if(r[0]?.source?.includes('→'))e.lookupMsg.textContent='Best UPC match was automatically enriched. Choose it below.';else e.lookupMsg.textContent='Found '+r.length+' match'+(r.length===1?'':'es')+'. Choose the best result.';
+    e.results.innerHTML='';r.forEach((x,i)=>{const d=document.createElement('div');d.className='result';d.innerHTML=(x.coverUrl?`<img src="${esc(x.coverUrl)}" onerror="this.style.visibility='hidden'">`:'<div class="cover"></div>')+`<div><div class="title">${esc(x.title||'Untitled')}</div><div class="meta">${esc([x.type,x.format,x.creator,x.year,x.genre,x.detail,x.source].filter(Boolean).join(' • '))}</div></div><button data-pick="${i}">Use</button>`;e.results.appendChild(d)});e.results.onclick=ev=>{if(ev.target.dataset.pick===undefined)return;const x=r[+ev.target.dataset.pick];for(const k of['type','title','creator','year','genre','coverUrl','format'])if(x[k])e[k].value=x[k];e.modal.classList.add('hidden');status('Metadata loaded from '+x.source+'. Review it, then save.','ok')}
+  }
+  addUiEnhancements();window.lookup=enhancedLookup;try{lookup=enhancedLookup}catch(_){}
 })();
