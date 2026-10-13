@@ -111,3 +111,66 @@
 
   window.addEventListener('pagehide',stopCamera);
 })();
+
+(function(){
+  if(window.__reelRecordUseAndAddV7)return;
+  window.__reelRecordUseAndAddV7=true;
+
+  function decorateResult(row){
+    if(!row||row.querySelector('[data-use-add]'))return;
+    const useButton=row.querySelector('button[data-pick],button[data-vpick]');
+    if(!useButton)return;
+
+    const holder=document.createElement('div');
+    holder.style.display='grid';
+    holder.style.gap='6px';
+    holder.style.alignSelf='center';
+    useButton.replaceWith(holder);
+    holder.appendChild(useButton);
+
+    const quick=document.createElement('button');
+    quick.type='button';
+    quick.className='secondary';
+    quick.textContent='Use & Add';
+    quick.dataset.useAdd='1';
+    quick.title='Use this match, add it to inventory, and keep scanning';
+    quick.onclick=ev=>{
+      ev.preventDefault();
+      ev.stopPropagation();
+      const itemTitle=row.querySelector('.title')?.textContent?.trim()||'Item';
+
+      // Reuse the app's existing Use action so every field is filled exactly the
+      // same way as a normal selection, including TV season information.
+      useButton.click();
+
+      // Then reuse the existing Add to Inventory button. This preserves duplicate
+      // detection/quantity behavior and keeps the barcode camera running.
+      const saveButton=document.getElementById('save');
+      if(saveButton){
+        saveButton.click();
+        const scanStatus=document.getElementById('scanStatus');
+        if(scanStatus)scanStatus.textContent='Added '+itemTitle+'. Camera active — scan the next barcode.';
+        try{lastTime=Date.now();}catch(_){}
+      }
+    };
+    holder.appendChild(quick);
+  }
+
+  function decorateAll(){
+    document.querySelectorAll('#results .result').forEach(decorateResult);
+  }
+
+  const results=document.getElementById('results');
+  if(results){
+    new MutationObserver(decorateAll).observe(results,{childList:true,subtree:true});
+    decorateAll();
+  }else{
+    let tries=0;
+    const timer=setInterval(()=>{
+      tries++;
+      const r=document.getElementById('results');
+      if(r){new MutationObserver(decorateAll).observe(r,{childList:true,subtree:true});decorateAll();clearInterval(timer);}
+      else if(tries>30)clearInterval(timer);
+    },200);
+  }
+})();
