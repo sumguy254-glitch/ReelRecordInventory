@@ -18,6 +18,14 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import com.google.mlkit.vision.barcode.BarcodeScanner;
+import com.google.mlkit.vision.barcode.BarcodeScanning;
+import com.google.mlkit.vision.barcode.common.Barcode;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -38,6 +46,7 @@ import java.util.regex.Pattern;
 public class MainActivity extends Activity {
     private static final int CAMERA_REQUEST = 1001;
     private static final int FILE_CHOOSER_REQUEST = 1002;
+    private static final int VISUAL_SEARCH_REQUEST = 1003;
     private static final String MOVIE_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1po70GCN9JUwrWgycMueNfxpEvBjLd7DQkiMRUQFFsL8/export?format=csv&gid=0";
     private static final long MOVIE_CATALOG_TTL_MS = 12L * 60L * 60L * 1000L;
     private static final Pattern UPC12 = Pattern.compile("(?<!\\d)(\\d{12})(?!\\d)");
@@ -45,6 +54,7 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> fileCallback;
+    private Uri pendingVisualUri;
     private final Object movieCatalogLock = new Object();
     private Map<String, MovieMatch> movieCatalog = new HashMap<>();
     private long movieCatalogLoadedAt = 0L;
@@ -104,12 +114,10 @@ public class MainActivity extends Activity {
 
         loadBundledApp();
 
-        // Warm the movie catalog in the background so the first scan is usually fast.
         new Thread(() -> {
             try {
                 ensureMovieCatalog();
             } catch (Exception ignored) {
-                // The lookup method will retry if the preload fails.
             }
         }, "movie-catalog-preload").start();
     }
@@ -135,16 +143,125 @@ public class MainActivity extends Activity {
 
     private void injectEnhancements() {
         try {
-            String js = readAsset("enhance.js");
+            String js = readAsset("enhance.js") + "\n" + readAsset("visual_search.js");
             webView.evaluateJavascript(js, null);
         } catch (Exception ignored) {
-            // Base inventory app still works even if the optional enhancement fails.
+        }
+    }
+
+    private void launchVisualSearch() {
+        try {
+            Intent gallery = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            gallery.addCategory(Intent.CATEGORY_OPENABLE);
+            gallery.setType("image/*");
+
+            ArrayList<Intent> initial = new ArrayList<>();
+            Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            if (camera.resolveActivity(getPackageManager()) != null) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Images.Media.DISPLAY_NAME, "reel-record-visual-" + System.currentTimeMillis() + ".jpg");
+                values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ReelRecordInventory");
+                pendingVisualUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                if (pendingVisualUri != null) {
+                    camera.putExtra(MediaStore.EXTRA_OUTPUT, pendingVisualUri);
+                    camera.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    initial.add(camera);
+                }
+            }
+
+            Intent chooser = Intent.createChooser(gallery, "Visual Search");
+            if (!initial.isEmpty()) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, initial.toArray(new Intent[0]));
+            startActivityForResult(chooser, VISUAL_SEARCH_REQUEST);
+        } catch (Exception e) {
+            Toast.makeText(this, "Unable to start visual search: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void processVisualSearchImage(Uri uri) {
+        if (uri == null) {
+            sendVisualSearchError("No image was selected.");
+            return;
+        }
+        try {
+            InputImage image = InputImage.fromFilePath(this, uri);
+            BarcodeScanner barcodeScanner = BarcodeScanning.getClient();
+            TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+            JSONArray foundBarcodes = new JSONArray();
+
+            barcodeScanner.process(image)
+                    .addOnSuccessListener(barcodes -> {
+                        for (Barcode barcode : barcodes) {
+                            String raw = barcode.getRawValue();
+                            if (raw == null) continue;
+                            String digits = digitsOnly(raw);
+                            if (digits.length() >= 8 && digits.length() <= 14) foundBarcodes.put(digits);
+                        }
+                    })
+                    .addOnCompleteListener(barcodeTask -> {
+                        barcodeScanner.close();
+                        recognizer.process(image)
+                                .addOnSuccessListener(text -> {
+                                    try {
+                                        JSONObject result = new JSONObject();
+                                        result.put("barcodes", foundBarcodes);
+                                        result.put("text", text.getText() == null ? "" : text.getText());
+                                        sendVisualSearchResult(result);
+                                    } catch (Exception e) {
+                                        sendVisualSearchError("Could not read visual search result.");
+                                    }
+                                })
+                                .addOnFailureListener(err -> sendVisualSearchError("Text recognition failed: " + err.getMessage()))
+                                .addOnCompleteListener(textTask -> recognizer.close());
+                    });
+        } catch (Exception e) {
+            sendVisualSearchError("Could not open image: " + e.getMessage());
+        }
+    }
+
+    private void sendVisualSearchResult(JSONObject result) {
+        runOnUiThread(() -> {
+            String payload = JSONObject.quote(result.toString());
+            webView.evaluateJavascript(
+                    "if(window.onVisualSearchNativeResult){window.onVisualSearchNativeResult(" + payload + ");}",
+                    null
+            );
+        });
+    }
+
+    private void sendVisualSearchError(String message) {
+        try {
+            JSONObject result = new JSONObject();
+            result.put("error", message == null ? "Visual search failed." : message);
+            result.put("barcodes", new JSONArray());
+            result.put("text", "");
+            sendVisualSearchResult(result);
+        } catch (Exception ignored) {
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == VISUAL_SEARCH_REQUEST) {
+            Uri selected = null;
+            if (resultCode == RESULT_OK) {
+                if (data != null && data.getData() != null) selected = data.getData();
+                else selected = pendingVisualUri;
+            }
+            if (selected != null) {
+                processVisualSearchImage(selected);
+            } else {
+                if (pendingVisualUri != null) {
+                    try { getContentResolver().delete(pendingVisualUri, null, null); } catch (Exception ignored) {}
+                }
+                sendVisualSearchError("Visual search was cancelled.");
+            }
+            pendingVisualUri = null;
+            return;
+        }
+
         if (requestCode == FILE_CHOOSER_REQUEST && fileCallback != null) {
             Uri[] result = null;
             if (resultCode == RESULT_OK && data != null && data.getData() != null) {
@@ -238,7 +355,7 @@ public class MainActivity extends Activity {
         connection.setInstanceFollowRedirects(true);
         connection.setConnectTimeout(timeoutMs);
         connection.setReadTimeout(timeoutMs);
-        connection.setRequestProperty("User-Agent", "ReelRecordInventory/2.0 Android");
+        connection.setRequestProperty("User-Agent", "ReelRecordInventory/5.0 Android");
         connection.setRequestProperty("Accept", "application/json,text/csv,text/plain,*/*");
         int status = connection.getResponseCode();
         InputStream stream = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
@@ -328,7 +445,7 @@ public class MainActivity extends Activity {
         String category = data.optString("category", "").trim();
         String combined = name + " " + category;
         String lower = combined.toLowerCase();
-        String type = lower.matches(".*(music|vinyl|album|compact disc|\\bcd\\b|record).*" ) ? "Music" : "Movie";
+        String type = lower.matches(".*(music|vinyl|album|compact disc|\\bcd\\b|record).*") ? "Music" : "Movie";
         JSONObject result = new JSONObject();
         result.put("source", "upc.dev");
         result.put("type", type);
@@ -385,6 +502,11 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             return results.toString();
+        }
+
+        @JavascriptInterface
+        public void startVisualSearch() {
+            runOnUiThread(MainActivity.this::launchVisualSearch);
         }
 
         @JavascriptInterface
