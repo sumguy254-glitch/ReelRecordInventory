@@ -6,7 +6,7 @@
   let facing='environment';
   const realFetch=window.fetch ? window.fetch.bind(window) : null;
 
-  // UPCitemdb is now queried natively by Android. Avoid a second browser request
+  // UPCitemdb is queried natively by Android. Avoid a second browser request
   // from the older lookup layer, which would unnecessarily consume the free quota.
   if(realFetch){
     window.fetch=function(input,init){
@@ -138,13 +138,7 @@
       ev.preventDefault();
       ev.stopPropagation();
       const itemTitle=row.querySelector('.title')?.textContent?.trim()||'Item';
-
-      // Reuse the app's existing Use action so every field is filled exactly the
-      // same way as a normal selection, including TV season information.
       useButton.click();
-
-      // Then reuse the existing Add to Inventory button. This preserves duplicate
-      // detection/quantity behavior and keeps the barcode camera running.
       const saveButton=document.getElementById('save');
       if(saveButton){
         saveButton.click();
@@ -173,4 +167,191 @@
       else if(tries>30)clearInterval(timer);
     },200);
   }
+})();
+
+(function(){
+  if(window.__reelRecordInventoryV8)return;
+  window.__reelRecordInventoryV8=true;
+
+  const money=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
+  let currentTab='scan';
+  let resumeScanner=false;
+
+  function valueOf(x){const n=Number(x?.estimatedValue||0);return Number.isFinite(n)&&n>0?n:0;}
+  function qtyOf(x){const n=parseInt(x?.quantity||1,10);return Number.isFinite(n)&&n>0?n:1;}
+  function itemTotal(x){return valueOf(x)*qtyOf(x);}
+
+  function addStyles(){
+    if(document.getElementById('rrInventoryStyles'))return;
+    const s=document.createElement('style');
+    s.id='rrInventoryStyles';
+    s.textContent=`
+      #rrTabs{max-width:1100px;margin:12px auto 0;padding:0 14px;display:flex;gap:8px}
+      #rrTabs button{flex:1;padding:12px 14px;background:#23262d;border:1px solid #363b46}
+      #rrTabs button.active{background:#8b5cf6;border-color:#8b5cf6}
+      main.wrap.rr-tabbed{grid-template-columns:1fr;max-width:1100px}
+      .rr-value-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:12px;border-bottom:1px solid #363b46}
+      .rr-value-card{background:#121419;border:1px solid #363b46;border-radius:10px;padding:10px}
+      .rr-value-card .rr-label{color:#aab1bc;font-size:11px;margin-bottom:3px}
+      .rr-value-card .rr-amount{font-size:18px;font-weight:800}
+      .rr-item-value{color:#86efac;font-size:12px;margin-top:4px;font-weight:650}
+      #estimatedValueRow .rr-money-wrap{position:relative}
+      #estimatedValueRow .rr-dollar{position:absolute;left:11px;top:10px;color:#aab1bc;pointer-events:none}
+      #estimatedValue{padding-left:25px}
+      #rrEstimatedHelp{margin-top:5px;color:#aab1bc;font-size:11px}
+      @media(max-width:650px){.rr-value-summary{grid-template-columns:1fr 1fr}.rr-value-card .rr-amount{font-size:16px}}
+    `;
+    document.head.appendChild(s);
+  }
+
+  function addValueField(){
+    if(document.getElementById('estimatedValue'))return;
+    const quantity=document.getElementById('quantity');
+    const anchor=quantity?.parentElement?.parentElement;
+    if(!anchor)return;
+    const row=document.createElement('div');
+    row.id='estimatedValueRow';
+    row.innerHTML='<label>Estimated Value (per copy)</label><div class="rr-money-wrap"><span class="rr-dollar">$</span><input id="estimatedValue" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00"></div><div id="rrEstimatedHelp">Optional. Enter what you believe one copy is worth; collection totals multiply this by Quantity.</div>';
+    anchor.insertAdjacentElement('afterend',row);
+    try{e.estimatedValue=document.getElementById('estimatedValue')}catch(_){}
+  }
+
+  function addSummary(inventorySection){
+    if(document.getElementById('rrValueSummary'))return;
+    const box=document.createElement('div');
+    box.id='rrValueSummary';
+    box.className='rr-value-summary';
+    box.innerHTML=`
+      <div class="rr-value-card"><div class="rr-label">Movies</div><div id="rrMovieValue" class="rr-amount">$0.00</div></div>
+      <div class="rr-value-card"><div class="rr-label">TV Seasons</div><div id="rrTvValue" class="rr-amount">$0.00</div></div>
+      <div class="rr-value-card"><div class="rr-label">Music</div><div id="rrMusicValue" class="rr-amount">$0.00</div></div>
+      <div class="rr-value-card"><div class="rr-label">Total Collection</div><div id="rrTotalValue" class="rr-amount">$0.00</div></div>`;
+    const head=inventorySection?.querySelector('.head');
+    if(head)head.insertAdjacentElement('afterend',box);
+  }
+
+  function switchTab(name){
+    const main=document.querySelector('main.wrap');
+    if(!main)return;
+    const sections=Array.from(main.querySelectorAll(':scope > section.card'));
+    const scanSection=sections[0],inventorySection=sections[1];
+    if(!scanSection||!inventorySection)return;
+    currentTab=name==='inventory'?'inventory':'scan';
+    const scanBtn=document.getElementById('rrScanTab'),invBtn=document.getElementById('rrInventoryTab');
+    if(scanBtn)scanBtn.classList.toggle('active',currentTab==='scan');
+    if(invBtn)invBtn.classList.toggle('active',currentTab==='inventory');
+    scanSection.style.display=currentTab==='scan'?'block':'none';
+    inventorySection.style.display=currentTab==='inventory'?'block':'none';
+
+    if(currentTab==='inventory'){
+      try{resumeScanner=!!scanning;if(scanning)stopScan();}catch(_){}
+      try{window.render?.()}catch(_){}
+      window.scrollTo({top:0,behavior:'smooth'});
+    }else{
+      const shouldResume=resumeScanner;resumeScanner=false;
+      if(shouldResume)setTimeout(()=>{try{startScan()}catch(_){}},250);
+      window.scrollTo({top:0,behavior:'smooth'});
+    }
+  }
+  window.rrSwitchTab=switchTab;
+
+  function addTabs(){
+    const main=document.querySelector('main.wrap');
+    if(!main)return;
+    main.classList.add('rr-tabbed');
+    const sections=Array.from(main.querySelectorAll(':scope > section.card'));
+    const scanSection=sections[0],inventorySection=sections[1];
+    if(!scanSection||!inventorySection)return;
+    scanSection.id='rrScanSection';inventorySection.id='rrInventorySection';
+    if(!document.getElementById('rrTabs')){
+      const nav=document.createElement('div');nav.id='rrTabs';
+      nav.innerHTML='<button id="rrScanTab" class="active">📷 Scan / Add</button><button id="rrInventoryTab">📚 Inventory</button>';
+      document.querySelector('header')?.insertAdjacentElement('afterend',nav);
+      document.getElementById('rrScanTab').onclick=()=>switchTab('scan');
+      document.getElementById('rrInventoryTab').onclick=()=>switchTab('inventory');
+    }
+    addSummary(inventorySection);
+    switchTab('scan');
+  }
+
+  function updateTotals(){
+    let movie=0,tv=0,music=0,total=0;
+    try{
+      for(const x of inv){
+        const v=itemTotal(x);total+=v;
+        if(x.type==='TV Season')tv+=v;else if(x.type==='Music')music+=v;else movie+=v;
+      }
+    }catch(_){}
+    const vals={rrMovieValue:movie,rrTvValue:tv,rrMusicValue:music,rrTotalValue:total};
+    for(const [id,v] of Object.entries(vals)){const el=document.getElementById(id);if(el)el.textContent=money.format(v)}
+    let pill=document.getElementById('sValue');
+    if(!pill){const stats=document.querySelector('.stats');if(stats){pill=document.createElement('span');pill.id='sValue';pill.className='pill';stats.appendChild(pill)}}
+    if(pill)pill.textContent='Est. '+money.format(total);
+  }
+
+  function updateItemValueLabels(){
+    document.querySelectorAll('#items .item').forEach(row=>{
+      const editBtn=row.querySelector('button[data-edit]');
+      if(!editBtn)return;
+      let x=null;try{x=inv.find(a=>String(a.id)===String(editBtn.dataset.edit))}catch(_){}
+      if(!x)return;
+      let line=row.querySelector('.rr-item-value');
+      if(!line){line=document.createElement('div');line.className='rr-item-value';const textCol=row.children[1];if(textCol)textCol.appendChild(line)}
+      const unit=valueOf(x),total=itemTotal(x),q=qtyOf(x);
+      line.textContent=unit?(q>1?'Estimated: '+money.format(unit)+' each • '+money.format(total)+' total':'Estimated value: '+money.format(unit)):'Estimated value: Not set';
+      line.style.color=unit?'#86efac':'#aab1bc';
+    });
+  }
+
+  function patchDataFunctions(){
+    try{
+      if(typeof collect==='function'&&!window.__rrCollectV8){
+        window.__rrCollectV8=true;
+        const oldCollect=collect;
+        const next=function(){const x=oldCollect();const n=parseFloat(document.getElementById('estimatedValue')?.value||'0');x.estimatedValue=Number.isFinite(n)&&n>0?Math.round(n*100)/100:0;return x};
+        collect=next;window.collect=next;
+      }
+    }catch(_){}
+    try{
+      if(typeof clearForm==='function'&&!window.__rrClearV8){
+        window.__rrClearV8=true;
+        const oldClear=clearForm;
+        const next=function(){oldClear();const v=document.getElementById('estimatedValue');if(v)v.value=''};
+        clearForm=next;window.clearForm=next;
+      }
+    }catch(_){}
+    try{
+      if(typeof edit==='function'&&!window.__rrEditV8){
+        window.__rrEditV8=true;
+        const oldEdit=edit;
+        const next=function(idv){oldEdit(idv);let x=null;try{x=inv.find(a=>String(a.id)===String(idv))}catch(_){}const v=document.getElementById('estimatedValue');if(v)v.value=valueOf(x)||'';switchTab('scan')};
+        edit=next;window.edit=next;
+      }
+    }catch(_){}
+    try{
+      if(typeof render==='function'&&!window.__rrRenderV8){
+        window.__rrRenderV8=true;
+        const oldRender=render;
+        const next=function(){oldRender();updateItemValueLabels();updateTotals()};
+        render=next;window.render=next;
+      }
+    }catch(_){}
+  }
+
+  function patchResultSelection(){
+    const results=document.getElementById('results');if(!results)return;
+    results.addEventListener('click',ev=>{
+      const use=ev.target.closest?.('button[data-pick],button[data-vpick]');if(!use)return;
+      const row=use.closest('.result');if(!row)return;
+      const meta=row.querySelector('.meta')?.textContent||'';
+      const m=meta.match(/(?:estimated\s+(?:value|price)|value estimate)\s*[:$]?\s*\$?([0-9]+(?:\.[0-9]{1,2})?)/i);
+      if(m){const input=document.getElementById('estimatedValue');if(input&&!input.value)input.value=m[1]}
+    });
+  }
+
+  function init(){
+    addStyles();addValueField();addTabs();patchDataFunctions();patchResultSelection();
+    try{window.render?.()}catch(_){updateTotals()}
+  }
+  init();
 })();
