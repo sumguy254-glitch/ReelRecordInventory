@@ -5,10 +5,13 @@ import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -54,7 +57,6 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> fileCallback;
-    private Uri pendingVisualUri;
     private final Object movieCatalogLock = new Object();
     private Map<String, MovieMatch> movieCatalog = new HashMap<>();
     private long movieCatalogLoadedAt = 0L;
@@ -143,7 +145,7 @@ public class MainActivity extends Activity {
 
     private void injectEnhancements() {
         try {
-            String js = readAsset("enhance.js") + "\n" + readAsset("visual_search.js");
+            String js = readAsset("enhance.js") + "\n" + readAsset("visual_search.js") + "\n" + readAsset("camera_capture.js");
             webView.evaluateJavascript(js, null);
         } catch (Exception ignored) {
         }
@@ -154,27 +156,9 @@ public class MainActivity extends Activity {
             Intent gallery = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             gallery.addCategory(Intent.CATEGORY_OPENABLE);
             gallery.setType("image/*");
-
-            ArrayList<Intent> initial = new ArrayList<>();
-            Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-            if (camera.resolveActivity(getPackageManager()) != null) {
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.Images.Media.DISPLAY_NAME, "reel-record-visual-" + System.currentTimeMillis() + ".jpg");
-                values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-                values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ReelRecordInventory");
-                pendingVisualUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-                if (pendingVisualUri != null) {
-                    camera.putExtra(MediaStore.EXTRA_OUTPUT, pendingVisualUri);
-                    camera.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    initial.add(camera);
-                }
-            }
-
-            Intent chooser = Intent.createChooser(gallery, "Visual Search");
-            if (!initial.isEmpty()) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, initial.toArray(new Intent[0]));
-            startActivityForResult(chooser, VISUAL_SEARCH_REQUEST);
+            startActivityForResult(Intent.createChooser(gallery, "Choose Cover Photo"), VISUAL_SEARCH_REQUEST);
         } catch (Exception e) {
-            Toast.makeText(this, "Unable to start visual search: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Unable to choose photo: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -184,38 +168,69 @@ public class MainActivity extends Activity {
             return;
         }
         try {
-            InputImage image = InputImage.fromFilePath(this, uri);
-            BarcodeScanner barcodeScanner = BarcodeScanning.getClient();
-            TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-            JSONArray foundBarcodes = new JSONArray();
-
-            barcodeScanner.process(image)
-                    .addOnSuccessListener(barcodes -> {
-                        for (Barcode barcode : barcodes) {
-                            String raw = barcode.getRawValue();
-                            if (raw == null) continue;
-                            String digits = digitsOnly(raw);
-                            if (digits.length() >= 8 && digits.length() <= 14) foundBarcodes.put(digits);
-                        }
-                    })
-                    .addOnCompleteListener(barcodeTask -> {
-                        barcodeScanner.close();
-                        recognizer.process(image)
-                                .addOnSuccessListener(text -> {
-                                    try {
-                                        JSONObject result = new JSONObject();
-                                        result.put("barcodes", foundBarcodes);
-                                        result.put("text", text.getText() == null ? "" : text.getText());
-                                        sendVisualSearchResult(result);
-                                    } catch (Exception e) {
-                                        sendVisualSearchError("Could not read visual search result.");
-                                    }
-                                })
-                                .addOnFailureListener(err -> sendVisualSearchError("Text recognition failed: " + err.getMessage()))
-                                .addOnCompleteListener(textTask -> recognizer.close());
-                    });
+            processVisualSearchInput(InputImage.fromFilePath(this, uri));
         } catch (Exception e) {
             sendVisualSearchError("Could not open image: " + e.getMessage());
+        }
+    }
+
+    private void processVisualSearchBitmap(Bitmap bitmap) {
+        if (bitmap == null) {
+            sendVisualSearchError("Captured image could not be decoded.");
+            return;
+        }
+        try {
+            processVisualSearchInput(InputImage.fromBitmap(bitmap, 0));
+        } catch (Exception e) {
+            sendVisualSearchError("Could not analyze captured image: " + e.getMessage());
+        }
+    }
+
+    private void processVisualSearchInput(InputImage image) {
+        BarcodeScanner barcodeScanner = BarcodeScanning.getClient();
+        TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        JSONArray foundBarcodes = new JSONArray();
+
+        barcodeScanner.process(image)
+                .addOnSuccessListener(barcodes -> {
+                    for (Barcode barcode : barcodes) {
+                        String raw = barcode.getRawValue();
+                        if (raw == null) continue;
+                        String digits = digitsOnly(raw);
+                        if (digits.length() >= 8 && digits.length() <= 14) foundBarcodes.put(digits);
+                    }
+                })
+                .addOnCompleteListener(barcodeTask -> {
+                    barcodeScanner.close();
+                    recognizer.process(image)
+                            .addOnSuccessListener(text -> {
+                                try {
+                                    JSONObject result = new JSONObject();
+                                    result.put("barcodes", foundBarcodes);
+                                    result.put("text", text.getText() == null ? "" : text.getText());
+                                    sendVisualSearchResult(result);
+                                } catch (Exception e) {
+                                    sendVisualSearchError("Could not read visual search result.");
+                                }
+                            })
+                            .addOnFailureListener(err -> sendVisualSearchError("Text recognition failed: " + err.getMessage()))
+                            .addOnCompleteListener(textTask -> recognizer.close());
+                });
+    }
+
+    private void analyzeVisualDataUrl(String dataUrl) {
+        try {
+            if (dataUrl == null || dataUrl.trim().isEmpty()) {
+                sendVisualSearchError("No captured image was received.");
+                return;
+            }
+            int comma = dataUrl.indexOf(',');
+            String encoded = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
+            byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            processVisualSearchBitmap(bitmap);
+        } catch (Exception e) {
+            sendVisualSearchError("Captured image could not be decoded: " + e.getMessage());
         }
     }
 
@@ -245,20 +260,11 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == VISUAL_SEARCH_REQUEST) {
-            Uri selected = null;
-            if (resultCode == RESULT_OK) {
-                if (data != null && data.getData() != null) selected = data.getData();
-                else selected = pendingVisualUri;
-            }
-            if (selected != null) {
-                processVisualSearchImage(selected);
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                processVisualSearchImage(data.getData());
             } else {
-                if (pendingVisualUri != null) {
-                    try { getContentResolver().delete(pendingVisualUri, null, null); } catch (Exception ignored) {}
-                }
                 sendVisualSearchError("Visual search was cancelled.");
             }
-            pendingVisualUri = null;
             return;
         }
 
@@ -293,12 +299,19 @@ public class MainActivity extends Activity {
     private String normalizeMovieFormat(String value) {
         String s = value == null ? "" : value.toLowerCase();
         if (s.contains("hd dvd") || s.contains("hddvd")) return "HD DVD";
-        if (s.contains("4k") || s.contains("uhd")) return "4K UHD";
+        if (s.contains("4k") || s.contains("uhd") || s.contains("ultra hd")) return "4K UHD";
         if (s.contains("blu") || s.matches(".*\\bbr\\b.*")) return "Blu-ray";
         if (s.contains("dvd")) return "DVD";
         if (s.contains("vhs")) return "VHS";
         if (s.contains("laser")) return "LaserDisc";
         return "";
+    }
+
+    private String classifyProductType(String text) {
+        String s = text == null ? "" : text.toLowerCase();
+        if (s.matches(".*(music|vinyl|album|compact disc|\\bcd\\b|record|cassette).*")) return "Music";
+        if (s.matches(".*(season\\s*\\d+|complete season|complete series|television|tv series|tv season).*")) return "TV Season";
+        return "Movie";
     }
 
     private int headerIndex(List<String> headers, String wanted) {
@@ -355,7 +368,7 @@ public class MainActivity extends Activity {
         connection.setInstanceFollowRedirects(true);
         connection.setConnectTimeout(timeoutMs);
         connection.setReadTimeout(timeoutMs);
-        connection.setRequestProperty("User-Agent", "ReelRecordInventory/5.0 Android");
+        connection.setRequestProperty("User-Agent", "ReelRecordInventory/6.0 Android");
         connection.setRequestProperty("Accept", "application/json,text/csv,text/plain,*/*");
         int status = connection.getResponseCode();
         InputStream stream = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
@@ -431,6 +444,39 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    private JSONObject lookupUpcItemDb(String barcode) throws Exception {
+        String c = digitsOnly(barcode);
+        if (c.isEmpty()) return null;
+        String body = httpGet("https://api.upcitemdb.com/prod/trial/lookup?upc=" + URLEncoder.encode(c, "UTF-8"), 8000);
+        JSONObject root = new JSONObject(body);
+        JSONArray items = root.optJSONArray("items");
+        if (items == null || items.length() == 0) return null;
+        JSONObject item = items.optJSONObject(0);
+        if (item == null) return null;
+
+        String title = item.optString("title", "").trim();
+        if (title.isEmpty()) return null;
+        String brand = item.optString("brand", "").trim();
+        String category = item.optString("category", "").trim();
+        String description = item.optString("description", "").trim();
+        String combined = title + " " + category + " " + description;
+        String cover = "";
+        JSONArray images = item.optJSONArray("images");
+        if (images != null && images.length() > 0) cover = images.optString(0, "");
+
+        JSONObject result = new JSONObject();
+        result.put("source", "UPCitemdb");
+        result.put("type", classifyProductType(combined));
+        result.put("title", title);
+        result.put("creator", brand);
+        result.put("year", "");
+        result.put("genre", category);
+        result.put("coverUrl", cover);
+        result.put("format", normalizeMovieFormat(combined));
+        result.put("detail", description.isEmpty() ? category : description);
+        return result;
+    }
+
     private JSONObject lookupUpcDev(String barcode) throws Exception {
         String c = digitsOnly(barcode);
         if (c.isEmpty()) return null;
@@ -444,11 +490,9 @@ public class MainActivity extends Activity {
         String brand = data.optString("brand", "").trim();
         String category = data.optString("category", "").trim();
         String combined = name + " " + category;
-        String lower = combined.toLowerCase();
-        String type = lower.matches(".*(music|vinyl|album|compact disc|\\bcd\\b|record).*") ? "Music" : "Movie";
         JSONObject result = new JSONObject();
         result.put("source", "upc.dev");
-        result.put("type", type);
+        result.put("type", classifyProductType(combined));
         result.put("title", name);
         result.put("creator", brand);
         result.put("year", "");
@@ -497,6 +541,11 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             try {
+                JSONObject product = lookupUpcItemDb(barcode);
+                if (product != null) results.put(product);
+            } catch (Exception ignored) {
+            }
+            try {
                 JSONObject product = lookupUpcDev(barcode);
                 if (product != null) results.put(product);
             } catch (Exception ignored) {
@@ -507,6 +556,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void startVisualSearch() {
             runOnUiThread(MainActivity.this::launchVisualSearch);
+        }
+
+        @JavascriptInterface
+        public void analyzeVisualImage(String dataUrl) {
+            analyzeVisualDataUrl(dataUrl);
         }
 
         @JavascriptInterface
