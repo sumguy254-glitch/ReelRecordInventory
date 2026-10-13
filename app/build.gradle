@@ -9,7 +9,6 @@ android {
         minSdk 29
         targetSdk 35
         versionCode 8
-        targetSdk 35
         versionName '8.0'
     }
 }
